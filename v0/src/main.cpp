@@ -1,5 +1,53 @@
 #include "main.h"
 
+#include <cmath>
+
+// V5 Inertial Sensor: 3-axis gyro (deg/s) + 3-axis accelerometer (g)
+constexpr std::uint8_t IMU_PORT = 10;
+pros::Imu imu(IMU_PORT);
+
+// V5 Rotation Sensor on a drive axle / tracking wheel: angle + speed of the shaft
+constexpr std::int8_t ROTATION_PORT = 11;
+pros::Rotation rotation(ROTATION_PORT);
+
+// Thresholds for deciding whether the robot is moving
+constexpr double GYRO_MOVING_DPS = 5.0;     // any axis rotating faster than this
+constexpr double ACCEL_MOVING_G = 0.05;     // total accel differing from 1 g (gravity) by more than this
+constexpr double WHEEL_MOVING_DPS = 10.0;   // axle spinning faster than this
+constexpr int STILL_CYCLES_REQUIRED = 10;   // consecutive quiet readings before we call it still
+
+/**
+ * Returns true if the gyro, accelerometer or rotation sensor shows the
+ * robot is moving.
+ *
+ * The rotation sensor catches slow, smooth driving that barely shows up on
+ * the accelerometer, while the IMU catches turning and bumps.
+ *
+ * Accel magnitude is compared against 1 g so gravity is ignored no matter
+ * how the sensor is mounted. A short debounce stops the result flickering
+ * between readings.
+ */
+bool is_moving() {
+	static int still_cycles = 0;
+
+	pros::imu_gyro_s_t gyro = imu.get_gyro_rate();
+	pros::imu_accel_s_t accel = imu.get_accel();
+
+	bool rotating = std::fabs(gyro.x) > GYRO_MOVING_DPS || std::fabs(gyro.y) > GYRO_MOVING_DPS ||
+	                std::fabs(gyro.z) > GYRO_MOVING_DPS;
+	double accel_mag = std::sqrt(accel.x * accel.x + accel.y * accel.y + accel.z * accel.z);
+	bool accelerating = std::fabs(accel_mag - 1.0) > ACCEL_MOVING_G;
+	double wheel_dps = rotation.get_velocity() / 100.0;  // centidegrees/s -> deg/s
+	bool wheel_spinning = std::fabs(wheel_dps) > WHEEL_MOVING_DPS;
+
+	if (rotating || accelerating || wheel_spinning) {
+		still_cycles = 0;
+		return true;
+	}
+	if (still_cycles < STILL_CYCLES_REQUIRED) still_cycles++;
+	return still_cycles < STILL_CYCLES_REQUIRED;
+}
+
 /**
  * A callback function for LLEMU's center button.
  *
@@ -27,6 +75,13 @@ void initialize() {
 	pros::lcd::set_text(1, "Hello PROS User!");
 
 	pros::lcd::register_btn1_cb(on_center_button);
+
+	// Calibrate the IMU (~2 s). The robot must stay still during this.
+	pros::lcd::set_text(3, "Calibrating IMU...");
+	imu.reset(true);
+	pros::lcd::clear_line(3);
+
+	rotation.reset_position();
 }
 
 /**
@@ -89,6 +144,17 @@ void opcontrol() {
 		int turn = master.get_analog(ANALOG_RIGHT_X);  // Gets the turn left/right from right joystick
 		left_mg.move(dir - turn);                      // Sets left motor voltage
 		right_mg.move(dir + turn);                     // Sets right motor voltage
+
+		// IMU readouts + movement detection
+		pros::imu_gyro_s_t gyro = imu.get_gyro_rate();
+		pros::imu_accel_s_t accel = imu.get_accel();
+		pros::lcd::print(3, "Heading: %.1f deg", imu.get_heading());
+		pros::lcd::print(4, "Gyro  x:%.1f y:%.1f z:%.1f", gyro.x, gyro.y, gyro.z);
+		pros::lcd::print(5, "Accel x:%.2f y:%.2f z:%.2f", accel.x, accel.y, accel.z);
+		pros::lcd::print(6, "Wheel: %.1f deg  %.1f deg/s", rotation.get_position() / 100.0,
+		                 rotation.get_velocity() / 100.0);
+		pros::lcd::print(7, is_moving() ? "MOVING" : "STILL");
+
 		pros::delay(20);                               // Run for 20 ms then update
 	}
 }
